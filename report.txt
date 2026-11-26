@@ -1,7 +1,17 @@
-עודכן: 2026-11-26 18:50 UTC
+עודכן: 2026-11-26 19:20 UTC
 מוצרים: 69,000
 סווגו למחלקה: 86%
 
+סקרייפרים: YAYNO_BITAN_AND_CARREFOUR, CITY_MARKET_KIRYATGAT, CITY_MARKET_SHOPS, HAZI_HINAM, VICTORY_NEW_SOURCE, VICTORY, CITY_MARKET_GIVATAYIM, CITY_MARKET_KIRYATONO
+  ❌ YAYNO_BITAN_AND_CARREFOUR: <DumpFolderNames.YAYNO_BITAN_AND_CARREFOUR: 'YaynotBitanAndCarrefour'>
+  ❌ CITY_MARKET_KIRYATGAT: <DumpFolderNames.CITY_MARKET_KIRYATGAT: 'CityMarketKiryatGat'>
+  ❌ CITY_MARKET_SHOPS: <DumpFolderNames.CITY_MARKET_SHOPS: 'CityMarketShops'>
+  ❌ HAZI_HINAM: <DumpFolderNames.HAZI_HINAM: 'HaziHinam'>
+  ❌ VICTORY_NEW_SOURCE: <DumpFolderNames.VICTORY_NEW_SOURCE: 'VictoryNewSource'>
+  ❌ VICTORY: class_names VICTORY not found
+  ❌ CITY_MARKET_GIVATAYIM: class_names CITY_MARKET_GIVATAYIM not found
+  ❌ CITY_MARKET_KIRYATONO: class_names CITY_MARKET_KIRYATONO not found
+הורדת רשתות נוספות: 9 שנ׳
 ✅ שופרסל: 8 סניפים, 14,199 מוצרים חדשים
 ✅ רמי לוי: 8 סניפים, 13,800 מוצרים חדשים
 ✅ יוחננוף: 8 סניפים, 5,638 מוצרים חדשים
@@ -31,7 +41,7 @@
 👶 תינוקות: 332
 🐾 חיות מחמד: 312
 
-זמן ריצה: 168 שניות
+זמן ריצה: 105 שניות
 
 
 === לא סווגו (דגימה) ===
