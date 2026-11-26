@@ -49,11 +49,12 @@ def ci_text(el, tag):
         if isinstance(c.tag, str) and c.tag.lower() == t: return (c.text or "").strip()
     return ""
 
+JUNK_RE = re.compile(r"חופשי (יומי|שבועי|חודשי|שנתי|סמסטר)|מנויי? תקופתי|ערך צבור|רב.?קו")
 def items_from(root):
     out = []
     for it in ci_all(root, "item"):
         code, name = ci_text(it, "itemcode"), ci_text(it, "itemname")
-        if code and name: out.append((code, html.unescape(name)))
+        if code and name and not JUNK_RE.search(name): out.append((code, html.unescape(name)))
     return out
 
 FILE_RE = re.compile(r"PriceFull(\d+)((?:-\d+)+)", re.I)
