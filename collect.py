@@ -20,7 +20,11 @@ S = requests.Session(); S.headers["User-Agent"] = UA
 
 
 # ---------- כלים ----------
+class _Local:
+    def __init__(self, path): self.content = open(path, "rb").read(); self.text = ""
+
 def get(url, session=None, **kw):
+    if url.startswith("file:"): return _Local(url[5:])
     s = session or S; kw.setdefault("timeout", 90)
     try: return s.get(url, **kw)
     except requests.exceptions.SSLError: return s.get(url, verify=False, **kw)
@@ -222,7 +226,15 @@ def tidy(n):
 # ---------- הרצה ----------
 def main():
     t0 = time.time(); report, products = [], {}
+    open(".gitignore", "w").write("__pycache__/\ndumps/\n")
     sources = [("שופרסל", shufersal)] + [(c, (lambda u=u, p=p: cerberus(u, p))) for c, (u, p) in CERB_CHAINS.items()]
+    try:   # קרפור, ויקטורי, חצי חינם, סיטי מרקט — דרך הכלי הפתוח
+        import extras
+        extras.download(log=lambda m: (print(m, flush=True), report.append(m)))
+        for chain, _stores, files in extras.local_sources():
+            sources.append((chain, lambda files=files: [(u, None) for u in spread(latest_per_store(files), STORES_PER_CHAIN)]))
+    except Exception as e:
+        report.append(f"❌ רשתות נוספות: {str(e)[:150]}")
     for chain, fn in sources:
         try:
             files = fn(); n_before = len(products); n_items = 0

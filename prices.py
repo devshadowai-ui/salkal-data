@@ -8,14 +8,14 @@
   prices/c/<n>.json      — כל הסניפים בעיר אחת עם המחירים שלהם (האפליקציה טוענת רק את העיר שנבחרה)
 """
 import html, json, os, re, sys, time
-from collections import defaultdict
+from collections import defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import requests
 from collect import (get, parse_xml, ci_all, ci_text, file_info, CERB, CERB_CHAINS, UA, _tok, key, tidy, CATS)
 
-MAX_STORES = int(os.environ.get("MAX_STORES", "400"))   # תקרת סניפים לרשת (ביטחון לזמן ריצה)
+MAX_STORES = int(os.environ.get("MAX_STORES", "700"))   # תקרת סניפים לרשת (ביטחון לזמן ריצה)
 
 # ---------- שמות ערים לפי סמל יישוב (חלק מהרשתות כותבות מספר במקום שם) ----------
 CITY_CODES = {
@@ -32,9 +32,13 @@ CITY_CODES = {
     "3797": "מודיעין עילית", "2550": "גדרה", "1034": "קריית מלאכי", "9300": "זכרון יעקב", "7800": "פרדס חנה-כרכור",
     "168": "כפר יונה", "1304": "שוהם", "229": "גני תקווה", "1020": "אור עקיבא", "9200": "בית שאן",
 }
+UNKNOWN_CODES = Counter()
 def city_name(raw):
     raw = (raw or "").strip()
-    if raw.isdigit(): return CITY_CODES.get(raw.lstrip("0") or "0")
+    if raw.isdigit():
+        c = CITY_CODES.get(raw.lstrip("0") or "0")
+        if not c and raw.strip("0"): UNKNOWN_CODES[raw.lstrip("0")] += 1
+        return c
     raw = re.sub(r"\s+", " ", raw.replace("-", " - ")).replace(" - ", "-").strip()
     return raw or None
 
@@ -135,7 +139,9 @@ def geocode_all(stores, budget_sec=1200):
         return cache[q]
     for s in stores:
         addr = re.sub(r"\s+", " ", s["addr"] or "").strip()
-        ll = look(f"{addr}, {s['city']}") if addr and s["city"] else None
+        if addr and s["city"]: ll = look(f"{addr}, {s['city']}")
+        elif addr: ll = look(f"{addr}, {s['name']}, ישראל") or look(f"{addr}, ישראל")
+        else: ll = None
         if not ll and s["city"]: ll = look(s["city"]); s["approx"] = 1 if ll else 0
         if ll: s["lat"], s["lon"] = ll
     json.dump(cache, open(GEO_FILE, "w", encoding="utf-8"), ensure_ascii=False)
@@ -146,10 +152,18 @@ def main():
     t0 = time.time(); report = []
     chains, stores_all = {}, []          # chain -> {"g":..., "w":...} ; stores_all: list of store dicts
     sources = [("שופרסל", shufersal_lists)] + [(c, (lambda u=u, p=p: cerberus_lists(u, p))) for c, (u, p) in CERB_CHAINS.items()]
+    try:   # רשתות שהורדו לתיקייה dumps/ (קרפור, ויקטורי, חצי חינם, סיטי מרקט)
+        import extras
+        if not os.path.isdir(extras.DUMPS): extras.download()
+        for chain, stores_list, files in extras.local_sources():
+            sources.append((chain, lambda st=stores_list, f=files: (st, f, None)))
+    except Exception as e:
+        report.append(f"❌ רשתות נוספות: {str(e)[:150]}")
     for chain, fn in sources:
         try:
             stores_xml, links, sess = fn()
-            stores = stores_of(stores_xml)
+            stores = {}
+            for x in (stores_xml if isinstance(stores_xml, list) else [stores_xml]): stores.update(stores_of(x))
             files = latest_by_store(links)
             files = dict(list(files.items())[:MAX_STORES])
             got = []
@@ -180,6 +194,20 @@ def main():
 
     located = geocode_all(stores_all)
     report.append(f"📍 סניפים עם מיקום: {located} מתוך {len(stores_all)}")
+    # סניפים בלי עיר: לפי העיר שמופיעה בשם הסניף, או לפי העיר הקרובה ביותר על המפה
+    known = defaultdict(list)
+    for s in stores_all:
+        if s["city"] and "lat" in s: known[s["city"]].append((s["lat"], s["lon"]))
+    cent = {c: (sum(p[0] for p in v) / len(v), sum(p[1] for p in v) / len(v)) for c, v in known.items()}
+    names = sorted(set(CITY_CODES.values()) | set(cent), key=len, reverse=True)
+    for s in stores_all:
+        if s["city"]: continue
+        txt = f"{s['name']} {s['addr']}"
+        c = next((n for n in names if n.split("-")[0] in txt), None)
+        if not c and "lat" in s and cent:
+            c, d = min(((c, (s["lat"] - p[0]) ** 2 + (s["lon"] - p[1]) ** 2) for c, p in cent.items()), key=lambda x: x[1])
+            if d > 0.15 ** 2: c = None           # רחוק מכל עיר מוכרת (~15 ק"מ)
+        if c: s["city"] = c
     by_city = defaultdict(list)
     for s in stores_all: by_city[s["city"] or "לא ידוע"].append(s)
     cities = sorted(by_city.items(), key=lambda kv: (kv[0] == "לא ידוע", kv[0]))
@@ -199,6 +227,7 @@ def main():
         json.dump({"updated": updated, "chains": chains, "cities": city_index}, f, ensure_ascii=False, separators=(",", ":"))
     summary = [f"מחירים עודכנו: {updated}", f"סניפים: {len(stores_all)}", f"ערים: {len(city_index)}", ""] + report + \
               ["", "ערים עם הכי הרבה סניפים:"] + [f"  {c['name']}: {c['stores']}" for c in sorted(city_index, key=lambda c: -c["stores"])[:15]] + \
+              ["", "סמלי ערים לא מוכרים: " + ", ".join(f"{c}×{n}" for c, n in UNKNOWN_CODES.most_common(40))] + \
               [f"\nזמן ריצה: {time.time() - t0:.0f} שניות"]
     open("prices-report.txt", "w", encoding="utf-8").write("\n".join(summary)); print("\n".join(summary))
 
