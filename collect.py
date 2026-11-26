@@ -184,6 +184,14 @@ def main():
     summary = [f"עודכן: {catalog['updated']}", f"מוצרים: {len(rows):,}", f"סווגו למחלקה: {classified:.0%}", ""] + report + [""] + \
               [f"{(DEPTS[i] if i >= 0 else OTHER)}: {n:,}" for i, n in counts.most_common()] + [f"\nזמן ריצה: {time.time() - t0:.0f} שניות"]
     open("report.txt", "w", encoding="utf-8").write("\n".join(summary)); print("\n".join(summary))
+    # דוגמאות לכיוונון הסיווג: מוצרים שלא סווגו, ודגימה מכל מחלקה
+    import random; random.seed(1)
+    other = [n for n, i in rows if i < 0]
+    lines = ["=== לא סווגו (דגימה) ==="] + random.sample(other, min(400, len(other)))
+    for d in range(len(DEPTS)):
+        names = [n for n, i in rows if i == d]
+        lines += ["", f"=== {DEPTS[d]} (דגימה) ==="] + random.sample(names, min(40, len(names)))
+    with open("report.txt", "a", encoding="utf-8") as f: f.write("\n\n\n" + "\n".join(lines))
 
 if __name__ == "__main__":
     main()
