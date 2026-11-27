@@ -73,7 +73,7 @@ def discover():
     try: cat = json.load(open("catalog.json", encoding="utf-8"))["products"]
     except Exception: return
     gen = match_generic
-    brand = _brands()
+    brand = BRANDS
     rows, shown = [], defaultdict(Counter)
     for name, d in cat:
         n = tidy(name)
@@ -112,6 +112,21 @@ def discover():
     food = [(k, t) for k, t, d in rows if d != -1]            # מזון ומוצרי בית (בלי "לא מסווג")
     COVERAGE["after"] = sum(1 for k, t in food if covered(k, t)) / max(1, len(food))
     COVERAGE["total"] = len(food)
+def auto_brands():
+    """מותג = מילה שבאה לפני סוג מוצר: "טוסו חטיף", "טוסו עוגיות", "הוואי שמפו" -> טוסו, הוואי.
+    סוג מוצר = מילה ראשונה של שם במילון המקורי, או של כמה שמות חדשים ("חטיף ...", "גבינת ...")"""
+    orig_first = {key(t).split()[0] for d in CATS["departments"].values() for t in d}
+    heads = Counter(key(t).split()[0] for t in AUTO if len(key(t).split()) == 2)
+    types = orig_first | {w for w, n in heads.items() if n >= 3}
+    dict_words = {w for d in CATS["departments"].values() for t in d for w in key(t).split()}
+    pairs = defaultdict(lambda: [0, 0])          # מילה -> [לפני סוג מוצר, סה"כ]
+    for t in AUTO:
+        w = key(t).split()
+        if len(w) != 2 or w[0] in dict_words: continue
+        pairs[w[0]][1] += 1
+        if w[1] in types and len(w[1]) >= 3: pairs[w[0]][0] += 1
+    return {w for w, (a, n) in pairs.items() if a >= 2 and a / n >= 0.6 or (a == 1 and n == 1 and w + " " not in heads)}
+
 discover()
 _gcache = {}
 def generic_of(name):
@@ -183,7 +198,7 @@ def latest_by_store(links):
 # תחת השם במשקל (ירקות, בשר) — ממוצע לק״ג; אחרת — ממוצע הארוזים בלבד.
 WEIGHT_RE = re.compile(r"במשקל|לק[\"״']?ג|לקילו")
 import threading
-ALIAS, ALIAS_LOCK = Counter(), threading.Lock()   # (מילה/שתי מילים ראשונות, מוצר פשוט) -> כמה מוצרים
+ALIAS, ALIAS_LOCK, KG_VOTES = Counter(), threading.Lock(), Counter()   # (מילה/שתי מילים ראשונות, מוצר פשוט) -> כמה מוצרים
 def build_alias():
     """שם שמשתמש כותב ("במבה", "טונה סטארקיסט") -> המוצר הפשוט שרוב המוצרים שמתחילים כך שייכים אליו"""
     by_tok = defaultdict(Counter)
@@ -244,8 +259,9 @@ def store_prices(url, session):
                 if len(toks) > 1: ALIAS[(toks[0] + " " + toks[1], g)] += 1
     out = {}
     for g in set(kg) | set(unit):
-        v = kg[g] if len(kg[g]) > len(unit[g]) else unit[g]
-        out[g] = trimmed_mean(v)
+        by_kg = len(kg[g]) > len(unit[g])
+        out[g] = trimmed_mean(kg[g] if by_kg else unit[g])
+        with ALIAS_LOCK: KG_VOTES[g] += 1 if by_kg else -1
     # בלי גיבוי לפי "מילה ראשונה" — הוא ערבב מוצרים שונים (טונה בשימורים מול טונה טרייה)
     return out, {}
 
@@ -354,7 +370,9 @@ def main():
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     with open("prices/index.json", "w", encoding="utf-8") as f:
         alias = build_alias()
-        json.dump({"updated": updated, "chains": chains, "cities": city_index, "alias": alias}, f, ensure_ascii=False, separators=(",", ":"))
+        per_kg = sorted(g for g, v in KG_VOTES.items() if v > 0)      # שמות שהמחיר שלהם לק״ג (ירקות, בשר...)
+        json.dump({"updated": updated, "chains": chains, "cities": city_index, "alias": alias, "kg": per_kg}, f, ensure_ascii=False, separators=(",", ":"))
+    report.append(f"⚖️ מוצרים במחיר לק״ג: {len(per_kg)}")
     report.append(f"🔤 שמות חופשיים שמשויכים למוצר פשוט: {len(alias)}")
     if COVERAGE:
         report.append(f"🆕 שמות פשוטים חדשים שנמצאו אוטומטית: {len(AUTO)} (רשימה ב-prices/auto-names.txt)")
