@@ -106,19 +106,51 @@ def latest_by_store(links):
 
 
 # ---------- מחירים לסניף ----------
+# מחיר מוצר פשוט = ממוצע כל המוצרים שתחת אותו שם (כל החברות), למשל "קוטג׳ 3%".
+# מוצרים שנמכרים במשקל (מחיר לק״ג) לא מתערבבים עם מוצרים ארוזים: אם רוב המוצרים
+# תחת השם במשקל (ירקות, בשר) — ממוצע לק״ג; אחרת — ממוצע הארוזים בלבד.
+WEIGHT_RE = re.compile(r"במשקל|לק[\"״']?ג|לקילו")
+import threading
+ALIAS, ALIAS_LOCK = Counter(), threading.Lock()   # (מילה/שתי מילים ראשונות, מוצר פשוט) -> כמה מוצרים
+def build_alias():
+    """שם שמשתמש כותב ("במבה", "טונה סטארקיסט") -> המוצר הפשוט שרוב המוצרים שמתחילים כך שייכים אליו"""
+    by_tok = defaultdict(Counter)
+    for (t, g), n in ALIAS.items(): by_tok[t][g] += n
+    gkeys = {key(t).strip() for _, t in GENERIC}
+    out = {}
+    for t, c in by_tok.items():
+        if t in gkeys: continue
+        g, n = c.most_common(1)[0]; tot = sum(c.values())
+        if n >= 5 and n / tot >= 0.6: out[t] = g
+    return out
+
+def is_weighted(it, name):
+    if (ci_text(it, "bisweighted") or "").strip().lower() in ("1", "true"): return True
+    return bool(WEIGHT_RE.search(name))
+
 def store_prices(url, session):
     root = parse_xml(get(url, session=session, timeout=240).content)
-    g_prices, w_prices = defaultdict(list), defaultdict(list)
+    kg, unit = defaultdict(list), defaultdict(list)
     for it in ci_all(root, "item"):
         name, price = ci_text(it, "itemname"), ci_text(it, "itemprice")
         try: p = float(price)
-        except ValueError: continue
+        except (TypeError, ValueError): continue
         if not name or p <= 0 or p > 2000: continue
-        g, w = generic_of(name)
-        if g: g_prices[g].append(p)
-        if w: w_prices[w].append(p)
-    return ({g: trimmed_mean(v) for g, v in g_prices.items()},
-            {w: trimmed_mean(v) for w, v in w_prices.items() if len(v) >= 2})
+        name = html.unescape(name)
+        g, _ = generic_of(name)
+        if not g: continue
+        (kg if is_weighted(it, name) else unit)[g].append(p)
+        toks = [t for t in key(tidy(name)).split() if len(t) >= 2 and not re.search(r"\d", t)]
+        if toks:
+            with ALIAS_LOCK:
+                ALIAS[(toks[0], g)] += 1
+                if len(toks) > 1: ALIAS[(toks[0] + " " + toks[1], g)] += 1
+    out = {}
+    for g in set(kg) | set(unit):
+        v = kg[g] if len(kg[g]) > len(unit[g]) else unit[g]
+        out[g] = trimmed_mean(v)
+    # בלי גיבוי לפי "מילה ראשונה" — הוא ערבב מוצרים שונים (טונה בשימורים מול טונה טרייה)
+    return out, {}
 
 
 # ---------- מיקום סניפים (פעם אחת לכל כתובת; נשמר ב-geo-cache.json) ----------
@@ -224,7 +256,9 @@ def main():
         city_index.append(entry)
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     with open("prices/index.json", "w", encoding="utf-8") as f:
-        json.dump({"updated": updated, "chains": chains, "cities": city_index}, f, ensure_ascii=False, separators=(",", ":"))
+        alias = build_alias()
+        json.dump({"updated": updated, "chains": chains, "cities": city_index, "alias": alias}, f, ensure_ascii=False, separators=(",", ":"))
+    report.append(f"🔤 שמות חופשיים שמשויכים למוצר פשוט: {len(alias)}")
     summary = [f"מחירים עודכנו: {updated}", f"סניפים: {len(stores_all)}", f"ערים: {len(city_index)}", ""] + report + \
               ["", "ערים עם הכי הרבה סניפים:"] + [f"  {c['name']}: {c['stores']}" for c in sorted(city_index, key=lambda c: -c["stores"])[:15]] + \
               ["", "סמלי ערים לא מוכרים: " + ", ".join(f"{c}×{n}" for c, n in UNKNOWN_CODES.most_common(40))] + \
