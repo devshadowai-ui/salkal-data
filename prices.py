@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import requests
-from collect import (get, parse_xml, ci_all, ci_text, file_info, CERB, CERB_CHAINS, UA, _tok, key, tidy, CATS)
+from collect import (get, parse_xml, ci_all, ci_text, file_info, CERB, CERB_CHAINS, UA, _tok, key, tidy, CATS, classify, DEPTS, JUNK_RE)
 
 MAX_STORES = int(os.environ.get("MAX_STORES", "700"))   # תקרת סניפים לרשת (ביטחון לזמן ריצה)
 
@@ -45,12 +45,84 @@ def city_name(raw):
 
 # ---------- מוצר פשוט לכל שם מוצר ----------
 GENERIC = sorted({(key(t), t) for d in CATS["departments"].values() for t in d}, key=lambda x: -len(x[0]))
+_GIDX = {}
+def _reindex():
+    _GIDX.clear()
+    for kk, t in GENERIC: _GIDX.setdefault(kk.split()[0], []).append((kk, t))   # כבר ממוין מהארוך לקצר
+def match_generic(k):
+    """השם הפשוט הארוך ביותר שהשם מתחיל בו (k = key(...))"""
+    w = k.split()
+    if not w: return None
+    return next((t for kk, t in _GIDX.get(w[0], ()) if k.startswith(kk)), None)
+_reindex()
+
+# ---------- שמות פשוטים חדשים — אוטומטית מתוך כל המוצרים בסופרים ----------
+# מוצרים שלא נכנסו תחת אף שם פשוט: מחפשים תחילת-שם (מילה או שתיים) שחוזרת בהרבה מוצרים
+# של אותה מחלקה ("רוטב פסטו", "חטיף אנרגיה"), ומוסיפים אותה כשם פשוט. מותגים (מילה שמופיעה
+# בכמה מחלקות שונות, כמו "אסם") לא הופכים לשם.
+UNIT_WORDS = {"גרם", "גר", "מל", "ליטר", "יח", "יחידות", "קג", "ק", "ג", "מ", "ל", "של", "עם", "ללא", "בטעם", "במבצע", "חדש", "חדשה"}
+PACK_WORDS = {"מארז", "שלישיית", "שלישייה", "שלישית", "רביעיית", "רביעייה", "שישיית", "שישייה", "חמישיית", "זוג", "צמד", "מגש", "חבילת", "ענק", "משפחתי", "משפחתית"}
+def _brands():
+    try: return {key(w).strip() for line in open("brands.txt", encoding="utf-8") if not line.startswith("#") for w in line.split()}
+    except Exception: return set()
+BRANDS = _brands()
+AUTO, COVERAGE = {}, {}
+def discover():
+    """שם פשוט = סוג המוצר בתחילת השם, בלי מותג/אריזה/כמות: "מילקה שוקולד חלב 100 גרם" -> "שוקולד חלב".
+    שתי מילים כשיש מספיק מוצרים כאלה ("גבינת עיזים"), ואחרת מילה אחת ("חטיף")."""
+    try: cat = json.load(open("catalog.json", encoding="utf-8"))["products"]
+    except Exception: return
+    gen = match_generic
+    brand = _brands()
+    rows, shown = [], defaultdict(Counter)
+    for name, d in cat:
+        n = tidy(name)
+        toks = []
+        for w in n.split():
+            kw = key(w).strip()
+            if len(kw) >= 2 and not re.search(r"[\da-z]", kw) and kw not in UNIT_WORDS: toks.append((kw, w.strip("-,.()'\"")))
+            elif toks and re.search(r"\d", kw): break           # אחרי מספר (כמות/משקל) בא בדרך כלל המותג — עוצרים
+        while toks and (toks[0][0] in PACK_WORDS or toks[0][0] in brand): toks.pop(0)
+        rows.append((key(n), toks, d))
+    c2, c1 = defaultdict(Counter), defaultdict(Counter)
+    matched = 0
+    for k, toks, d in rows:
+        if gen(k): matched += 1; continue
+        if d == -1 or not toks: continue
+        t1 = toks[0][0]; c1[t1][d] += 1; shown[t1][toks[0][1]] += 1
+        if len(toks) > 1 and toks[1][0] not in brand:
+            t2 = t1 + " " + toks[1][0]; c2[t2][d] += 1; shown[t2][toks[0][1] + " " + toks[1][1]] += 1
+    def ok(c, need):
+        d, n = c.most_common(1)[0]; return d if n >= need and n / sum(c.values()) >= 0.6 else None
+    for t, c in c2.items():
+        d = ok(c, 4)
+        if d is not None: AUTO[shown[t].most_common(1)[0][0]] = DEPTS[d]
+    for t, c in c1.items():
+        d = ok(c, 5)
+        if d is not None and len(t) >= 3: AUTO.setdefault(shown[t].most_common(1)[0][0], DEPTS[d])
+    COVERAGE["before"] = sum(1 for k, _, d in rows if d != -1 and gen(k)) / max(1, sum(1 for r in rows if r[2] != -1))
+    global GENERIC
+    known = {kk.strip() for kk, _ in GENERIC}
+    for t in list(AUTO):
+        if key(t).strip() in known: del AUTO[t]
+    GENERIC = sorted(set(GENERIC) | {(key(t), t) for t in AUTO}, key=lambda x: -len(x[0]))
+    _reindex()
+    # כיסוי: מוצר נחשב מכוסה אם השם שלו, או השם בלי המותג בהתחלה, מתחיל בשם פשוט
+    def covered(k, toks): return gen(k) or (toks and gen(" " + " ".join(t for t, _ in toks) + " "))
+    food = [(k, t) for k, t, d in rows if d != -1]            # מזון ומוצרי בית (בלי "לא מסווג")
+    COVERAGE["after"] = sum(1 for k, t in food if covered(k, t)) / max(1, len(food))
+    COVERAGE["total"] = len(food)
+discover()
 _gcache = {}
 def generic_of(name):
     """("חלב טרי 3% תנובה 1 ליטר") -> ("חלב 3%"?, "חלב") : מוצר פשוט מהמילון + המילה הראשונה"""
     if name in _gcache: return _gcache[name]
     k = key(tidy(name))
-    g = next((t for kk, t in GENERIC if k.startswith(kk)), None)
+    g = match_generic(k)
+    if not g:                                   # "מילקה שוקולד חלב" -> "שוקולד חלב"
+        ws = k.split()
+        while ws and (ws[0] in BRANDS or ws[0] in PACK_WORDS): ws.pop(0)
+        if ws: g = match_generic(" " + " ".join(ws) + " ")
     toks = [t for t in k.split() if not re.search(r"\d", t) and len(t) >= 2]
     w = toks[0] if toks else None
     _gcache[name] = (g, w); return g, w
@@ -128,6 +200,27 @@ def is_weighted(it, name):
     if (ci_text(it, "bisweighted") or "").strip().lower() in ("1", "true"): return True
     return bool(WEIGHT_RE.search(name))
 
+# שם כללי ("חלב") כולל גם את הסוגים הרגילים שלו ("חלב 3%", "חלב טרי", "חלב בשקית"),
+# אבל לא סוגים שהם בעצם מוצר אחר ("חלב שוקו", "חלב שקדים", "טונה טרייה")
+DIFF_WORDS = {"שוקו", "שקדים", "סויה", "שיבולת", "אורז", "קוקוס", "עיזים", "עזים", "כבשים", "לקטוז", "טבעוני", "טבעונית",
+              "צמחי", "צמחית", "הצומח", "טרייה", "טריה", "קלויה", "מעושן", "מעושנת", "דיאט", "זירו", "לייט"}
+GDEPT = {t: i for i, d in enumerate(DEPTS) for t in CATS["departments"][d]}
+for _t, _d in AUTO.items(): GDEPT.setdefault(_t, DEPTS.index(_d))
+# שם כללי שלא קיים במילון אבל יש לו כמה סוגים באותה מחלקה ("טונה" ← "טונה בשמן", "טונה במים")
+_fw = defaultdict(Counter)
+for t, i in list(GDEPT.items()):
+    w = t.split()
+    if len(w) > 1 and len(w[0]) >= 3: _fw[w[0]][i] += 1
+for w0, ds in _fw.items():
+    d, n = ds.most_common(1)[0]
+    if w0 not in GDEPT and n >= 2 and n / sum(ds.values()) >= 0.5: GDEPT[w0] = d
+_terms = sorted(GDEPT, key=len)
+ANCESTORS = {}
+for t in _terms:
+    kt = key(t)
+    ANCESTORS[t] = [a for a in _terms if a != t and kt.startswith(key(a)) and GDEPT[a] == GDEPT[t]
+                    and not (set(kt[len(key(a)) - 1:].split()) & DIFF_WORDS)]
+
 def store_prices(url, session):
     root = parse_xml(get(url, session=session, timeout=240).content)
     kg, unit = defaultdict(list), defaultdict(list)
@@ -137,9 +230,13 @@ def store_prices(url, session):
         except (TypeError, ValueError): continue
         if not name or p <= 0 or p > 2000: continue
         name = html.unescape(name)
+        if JUNK_RE.search(name): continue          # טבק/סיגריות/וייפים ומנויי תחבורה
         g, _ = generic_of(name)
         if not g: continue
-        (kg if is_weighted(it, name) else unit)[g].append(p)
+        d = classify(tidy(name))
+        if d != -1 and d != GDEPT.get(g, d): continue          # "חלב גוף" (פארם) לא נכנס ל"חלב"
+        bucket = kg if is_weighted(it, name) else unit
+        for t in [g] + ANCESTORS.get(g, []): bucket[t].append(p)
         toks = [t for t in key(tidy(name)).split() if len(t) >= 2 and not re.search(r"\d", t)]
         if toks:
             with ALIAS_LOCK:
@@ -259,6 +356,13 @@ def main():
         alias = build_alias()
         json.dump({"updated": updated, "chains": chains, "cities": city_index, "alias": alias}, f, ensure_ascii=False, separators=(",", ":"))
     report.append(f"🔤 שמות חופשיים שמשויכים למוצר פשוט: {len(alias)}")
+    if COVERAGE:
+        report.append(f"🆕 שמות פשוטים חדשים שנמצאו אוטומטית: {len(AUTO)} (רשימה ב-prices/auto-names.txt)")
+        report.append(f"📦 מוצרים שנכנסו תחת שם פשוט: {COVERAGE['before']:.0%} → {COVERAGE['after']:.0%} מתוך {COVERAGE['total']:,}")
+        with open("prices/auto-names.txt", "w", encoding="utf-8") as f:
+            for d in DEPTS:
+                ts = sorted(t for t, dd in AUTO.items() if dd == d)
+                if ts: f.write(f"\n{d} ({len(ts)}):\n" + "\n".join("  " + t for t in ts) + "\n")
     summary = [f"מחירים עודכנו: {updated}", f"סניפים: {len(stores_all)}", f"ערים: {len(city_index)}", ""] + report + \
               ["", "ערים עם הכי הרבה סניפים:"] + [f"  {c['name']}: {c['stores']}" for c in sorted(city_index, key=lambda c: -c["stores"])[:15]] + \
               ["", "סמלי ערים לא מוכרים: " + ", ".join(f"{c}×{n}" for c, n in UNKNOWN_CODES.most_common(40))] + \

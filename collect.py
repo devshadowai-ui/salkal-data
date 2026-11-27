@@ -49,7 +49,11 @@ def ci_text(el, tag):
         if isinstance(c.tag, str) and c.tag.lower() == t: return (c.text or "").strip()
     return ""
 
-JUNK_RE = re.compile(r"חופשי (יומי|שבועי|חודשי|שנתי|סמסטר)|מנויי? תקופתי|ערך צבור|רב.?קו")
+JUNK_RE = re.compile(r"חופשי (יומי|שבועי|חודשי|שנתי|סמסטר)|מנויי? תקופתי|ערך צבור|רב.?קו"
+    # טבק, סיגריות ווייפים — לא מופיעים באפליקציה
+    r"|טבק|סיגר|ניקוטין|נרגיל|וייפ|\bויפ\b|\bvape|\bhqd\b|elf ?bar|tesla ?bar|\b\d{1,2}k\b|\bocb\b|נייר גלגול|פילטרים? לסיגר|"
+    r"מרלבורו|marlboro|פרלמנט|parliament|כאמל|camel|ו?וינסטון|winston|פאל מאל|pall mall|רוטמנס|rothmans|גולדן ו?וירג|"
+    r"\bl ?& ?m\b|דאנהיל|dunhill|\bkent\b|קנט |ג'?יטאן|גלואז|נובלס|אולויס|נקסט (פיין|כחול|אדום|לבן|סילבר|פאקט|ארוך|קצר)", re.I)
 def items_from(root):
     out = []
     for it in ci_all(root, "item"):
@@ -191,6 +195,24 @@ def classify(name):
     return -1
 
 
+def learn_unclassified(rows):
+    """מוצר שלא זוהה: לפי המילים שבו. אם רוב המוצרים עם המילה "תרחיץ" בפארם — גם הוא לפארם"""
+    tok = lambda n: [x for x in key(n).split() if len(x) >= 2 and not re.search(r"\d", x)]
+    seen = {}
+    for n, d in rows:
+        if d == -1: continue
+        for t in set(tok(n)): seen.setdefault(t, Counter())[d] += 1
+    for r in rows:
+        if r[1] != -1: continue
+        votes = Counter()
+        for i, t in enumerate(tok(r[0])):
+            c = seen.get(t)
+            if not c: continue
+            d, m = c.most_common(1)[0]; share = m / sum(c.values())
+            if m >= 5 and share >= 0.75: votes[d] += (2 if i == 0 else 1) * share
+        if votes: r[1] = votes.most_common(1)[0][0]
+
+
 # ---------- שמות ברורים ----------
 def best_name(names):
     """מבין כל הכתיבים של אותו מוצר ברשתות השונות: הכי מלא, הכי מעט קיצורים, הכי נפוץ"""
@@ -265,6 +287,7 @@ def main():
         if len(n) >= 2 and k not in seen: seen.add(k); items.append(n)
     items.sort(key=lambda s: (len(s), s))
     rows = [[n, classify(n)] for n in items]
+    learn_unclassified(rows)
     counts = Counter(i for _, i in rows)
     classified = 1 - counts.get(-1, 0) / len(rows)
     catalog = {"updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), "departments": DEPTS, "other": OTHER, "products": rows}
