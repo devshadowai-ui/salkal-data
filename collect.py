@@ -195,6 +195,9 @@ def classify(name):
     return -1
 
 
+try: BRAND_WORDS = {key(w).strip() for line in open("brands.txt", encoding="utf-8") if not line.startswith("#") for w in line.split()}
+except Exception: BRAND_WORDS = set()
+
 def learn_unclassified(rows):
     """מוצר שלא זוהה: לפי המילים שבו. אם רוב המוצרים עם המילה "תרחיץ" בפארם — גם הוא לפארם"""
     tok = lambda n: [x for x in key(n).split() if len(x) >= 2 and not re.search(r"\d", x)]
@@ -299,7 +302,8 @@ def main():
     for n, i in rows:
         if i < 0: continue
         toks = [t for t in key(n).split() if not re.search(r"\d", t) and len(t) >= 2]
-        for w in {" ".join(toks[:1]), " ".join(toks[:2])}:
+        ws = {" ".join(toks[:1]), " ".join(toks[:2])} | {t for t in toks[1:] if t in BRAND_WORDS}   # מותג גם באמצע השם ("ממרח נוטלה")
+        for w in ws:
             if w: votes.setdefault(w, Counter())[i] += 1
     words = []
     for w, c in votes.items():

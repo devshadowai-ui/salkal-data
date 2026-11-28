@@ -142,6 +142,11 @@ def generic_of(name):
     w = toks[0] if toks else None
     _gcache[name] = (g, w); return g, w
 
+def median(xs):
+    xs = sorted(xs); n = len(xs)
+    if not n: return None
+    return round(xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2, 2)
+
 def trimmed_mean(xs):
     xs = sorted(xs)
     if len(xs) >= 5: cut = max(1, len(xs) // 10); xs = xs[cut:-cut]
@@ -236,9 +241,29 @@ for t in _terms:
     ANCESTORS[t] = [a for a in _terms if a != t and kt.startswith(key(a)) and GDEPT[a] == GDEPT[t]
                     and not (set(kt[len(key(a)) - 1:].split()) & DIFF_WORDS)]
 
-def store_prices(url, session):
+# ---------- רמה 3: מוצר ספציפי / מותג ("נוטלה", "סוויטנגו", "קפסולות נספרסו") ----------
+# כל מילה בשם המוצר שאינה סוג מוצר/כמות (מותג, סדרה, דגם) ומופיעה בלפחות 2 מוצרים.
+# המחיר נשמר לכל רשת (prices/tokens.json), לפי הסוג הכללי של המוצרים: "נוטלה" -> רוב המוצרים ממרח.
+def token_set():
+    try: cat = json.load(open("catalog.json", encoding="utf-8"))["products"]
+    except Exception: return set(BRANDS)
+    dict_words = {w for d in CATS["departments"].values() for t in d for w in key(t).split()}
+    type_first = {kk.split()[0] for kk, _ in GENERIC}
+    c = Counter()
+    for name, d in cat:
+        for w in set(key(tidy(name)).split()):
+            if len(w) >= 3 and not re.search(r"\d", w) and w not in dict_words and w not in type_first and w not in UNIT_WORDS and w not in PACK_WORDS: c[w] += 1
+    return {w for w, n in c.items() if n >= 2} | set(BRANDS)
+TOKENS = token_set()
+L1 = {g: (sorted(a, key=len)[0] if a else g) for g, a in ANCESTORS.items()}     # הסוג הכללי ביותר: "חלב 3%" -> "חלב"
+TOK_ACC = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))      # רשת -> (מילה, סוג כללי) -> [סכום, מספר סניפים]
+TOK_CNT = Counter()                                              # (מילה, סוג כללי) -> מוצרים
+TOK_LOCK = threading.Lock()
+
+def store_prices(url, session, chain=None):
     root = parse_xml(get(url, session=session, timeout=240).content)
     kg, unit = defaultdict(list), defaultdict(list)
+    bkg, bunit = defaultdict(list), defaultdict(list)
     for it in ci_all(root, "item"):
         name, price = ci_text(it, "itemname"), ci_text(it, "itemprice")
         try: p = float(price)
@@ -247,10 +272,15 @@ def store_prices(url, session):
         name = html.unescape(name)
         if JUNK_RE.search(name): continue          # טבק/סיגריות/וייפים ומנויי תחבורה
         g, _ = generic_of(name)
+        weighted = is_weighted(it, name)
+        kn = key(tidy(name)).split()
+        bb = bkg if weighted else bunit             # רמה 3: לפי מילה ספציפית + הסוג הכללי ("נוטלה|ממרח")
+        for w in [w for w in kn if w in TOKENS][:3]:
+            bb[(w, L1.get(g, g) if g else "")].append(p)
         if not g: continue
         d = classify(tidy(name))
         if d != -1 and d != GDEPT.get(g, d): continue          # "חלב גוף" (פארם) לא נכנס ל"חלב"
-        bucket = kg if is_weighted(it, name) else unit
+        bucket = kg if weighted else unit
         for t in [g] + ANCESTORS.get(g, []): bucket[t].append(p)
         toks = [t for t in key(tidy(name)).split() if len(t) >= 2 and not re.search(r"\d", t)]
         if toks:
@@ -262,7 +292,12 @@ def store_prices(url, session):
         by_kg = len(kg[g]) > len(unit[g])
         out[g] = trimmed_mean(kg[g] if by_kg else unit[g])
         with ALIAS_LOCK: KG_VOTES[g] += 1 if by_kg else -1
-    # בלי גיבוי לפי "מילה ראשונה" — הוא ערבב מוצרים שונים (טונה בשימורים מול טונה טרייה)
+    with TOK_LOCK:
+        acc = TOK_ACC[chain]
+        for k in set(bkg) | set(bunit):
+            v = bkg[k] if len(bkg[k]) > len(bunit[k]) else bunit[k]
+            e = acc[k]; e[0] += median(v); e[1] += 1
+            TOK_CNT[k] += len(v)
     return out, {}
 
 
@@ -314,20 +349,18 @@ def main():
             got = []
             def work(item):
                 sid, url = item
-                try: return sid, store_prices(url, sess)
+                try: return sid, store_prices(url, sess, chain)
                 except Exception as e: print("  failed", chain, sid, str(e)[:100]); return sid, None
             with ThreadPoolExecutor(6) as ex:
                 for sid, res in ex.map(work, files.items()):
                     if not res: continue
                     info = stores.get(sid, {"name": f"סניף {sid}", "city": "", "addr": ""})
-                    got.append({"chain": chain, "id": sid, "name": info["name"], "city": info["city"], "addr": info["addr"], "g": res[0], "w": res[1]})
+                    got.append({"chain": chain, "id": sid, "name": info["name"], "city": info["city"], "addr": info["addr"], "g": res[0]})
             # ממוצע ארצי לרשת: ממוצע של הסניפים
-            cg, cw = defaultdict(list), defaultdict(list)
+            cg = defaultdict(list)
             for s in got:
                 for g, p in s["g"].items(): cg[g].append(p)
-                for w, p in s["w"].items(): cw[w].append(p)
-            chains[chain] = {"stores": len(got), "g": {g: trimmed_mean(v) for g, v in cg.items()},
-                             "w": {w: trimmed_mean(v) for w, v in cw.items() if len(v) >= 2}}
+            chains[chain] = {"stores": len(got), "g": {g: trimmed_mean(v) for g, v in cg.items()}}
             stores_all += got
             report.append(f"✅ {chain}: {len(got)} סניפים עם מחירים, {len(cg)} מוצרים פשוטים")
         except Exception as e:
@@ -361,7 +394,7 @@ def main():
     city_index = []
     for n, (city, sts) in enumerate(cities):
         with open(f"prices/c/{n}.json", "w", encoding="utf-8") as f:
-            json.dump({"city": city, "stores": [{k: s[k] for k in ("chain", "name", "addr", "g", "w", "lat", "lon") if k in s} for s in sts]},
+            json.dump({"city": city, "stores": [{k: s[k] for k in ("chain", "name", "addr", "g", "lat", "lon") if k in s} for s in sts]},
                       f, ensure_ascii=False, separators=(",", ":"))
         pts = [(s["lat"], s["lon"]) for s in sts if "lat" in s]
         entry = {"name": city, "file": n, "stores": len(sts)}
@@ -371,8 +404,24 @@ def main():
     with open("prices/index.json", "w", encoding="utf-8") as f:
         alias = build_alias()
         per_kg = sorted(g for g, v in KG_VOTES.items() if v > 0)      # שמות שהמחיר שלהם לק״ג (ירקות, בשר...)
-        json.dump({"updated": updated, "chains": chains, "cities": city_index, "alias": alias, "kg": per_kg}, f, ensure_ascii=False, separators=(",", ":"))
+        json.dump({"updated": updated, "chains": chains, "cities": city_index, "alias": alias, "kg": per_kg,
+                   "l1": {g: t for g, t in L1.items() if t != g}}, f, ensure_ascii=False, separators=(",", ":"))
     report.append(f"⚖️ מוצרים במחיר לק״ג: {len(per_kg)}")
+    # רמה 3: prices/tokens.json  { מילה: {"t": סוג כללי, "c": {רשת: מחיר}, "x": {סוג אחר: {רשת: מחיר}}} }
+    by_tok = defaultdict(Counter)
+    for (w, t), n in TOK_CNT.items(): by_tok[w][t] += n
+    tokens = {}
+    for w, types in by_tok.items():
+        if sum(types.values()) < 2: continue
+        main = next((t for t, _ in types.most_common() if t), "")       # עדיף סוג ידוע על "בלי סוג"
+        def prices_for(t): return {ch: round(acc[(w, t)][0] / acc[(w, t)][1], 2) for ch, acc in TOK_ACC.items() if acc.get((w, t)) and acc[(w, t)][1]}
+        e = {"t": main, "c": prices_for(main)}
+        x = {t: prices_for(t) for t, n in types.items() if t != main and t and n >= 2}
+        if x: e["x"] = x
+        if e["c"]: tokens[w] = e
+    with open("prices/tokens.json", "w", encoding="utf-8") as f:
+        json.dump({"updated": updated, "tokens": tokens}, f, ensure_ascii=False, separators=(",", ":"))
+    report.append(f"🏷️ מוצרים ספציפיים/מותגים (רמה 3): {len(tokens):,}")
     report.append(f"🔤 שמות חופשיים שמשויכים למוצר פשוט: {len(alias)}")
     if COVERAGE:
         report.append(f"🆕 שמות פשוטים חדשים שנמצאו אוטומטית: {len(AUTO)} (רשימה ב-prices/auto-names.txt)")
